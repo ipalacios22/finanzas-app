@@ -3,11 +3,12 @@ import { profiles, expenses } from "../db/schema";
 import { eq, desc } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
+import { cookies } from "next/headers";
 import Link from "next/link";
 import ProfileSelect from "./ProfileSelect";
 import SubmitButton from "./SubmitButton";
+import PinModal from "./PinModal";
 
-// Server Actions directas para manejar la BD
 async function handleAddExpense(formData: FormData) {
   "use server";
   const profileId = Number(formData.get("profileId"));
@@ -58,23 +59,25 @@ async function handleReset(formData: FormData) {
 export default async function Home({
   searchParams,
 }: {
-  searchParams: Promise<{ profile?: string; limitModal?: string }>;
+  searchParams: Promise<{ profile?: string; limitModal?: string; error?: string }>;
 }) {
   const params = await searchParams;
 
-  // Obtener o crear perfiles iniciales en la BD si está vacía
   let allProfiles = await db.select().from(profiles);
   if (allProfiles.length === 0) {
-    const [p1] = await db.insert(profiles).values({ name: "Él", spendingLimit: "2000.00" }).returning();
-    const [p2] = await db.insert(profiles).values({ name: "Ella", spendingLimit: "2000.00" }).returning();
+    const [p1] = await db.insert(profiles).values({ name: "Él", spendingLimit: "2000.00", pin: "1234" }).returning();
+    const [p2] = await db.insert(profiles).values({ name: "Ella", spendingLimit: "2000.00", pin: "1234" }).returning();
     allProfiles = [p1, p2];
   }
 
-  // Perfil activo (por defecto el primero)
   const activeProfileId = params.profile ? Number(params.profile) : allProfiles[0].id;
   const currentProfile = allProfiles.find((p) => p.id === activeProfileId) || allProfiles[0];
 
-  // Obtener gastos del perfil activo
+  // Comprobar si la cookie de sesión activa coincide exactamente con el perfil seleccionado
+  const cookieStore = await cookies();
+  const activeAuthProfile = cookieStore.get("active_auth_profile")?.value;
+  const isAuthenticated = activeAuthProfile === currentProfile.id.toString();
+
   const listaGastos = await db
     .select()
     .from(expenses)
@@ -86,7 +89,6 @@ export default async function Home({
   const porcentaje = Math.min(Math.round((totalGasto / limite) * 100), 100);
   const excedeLimite = totalGasto > limite;
 
-  // Clases dinámicas según el semáforo
   let barraColor = "bg-emerald-500";
   let badgeTexto = "Dentro del presupuesto";
   let badgeColor = "text-emerald-400";
@@ -108,10 +110,20 @@ export default async function Home({
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center p-4 font-sans">
+      
+      {/* MODAL DE PIN SI NO ESTÁ AUTENTICADO EN ESTE PERFIL */}
+      {!isAuthenticated && (
+        <PinModal
+          profileId={currentProfile.id}
+          profileName={currentProfile.name}
+          hasError={params.error === "pin_incorrecto"}
+        />
+      )}
+
       {/* Contenedor tipo Celular */}
       <div className="w-full max-w-[393px] bg-slate-900 border border-slate-800 rounded-[40px] p-6 shadow-2xl space-y-6 relative overflow-hidden">
         
-        {/* Encabezado y Selector Select */}
+        {/* Encabezado y Selector */}
         <header className="space-y-4">
           <div className="flex justify-between items-center">
             <h1 className="text-xl font-bold tracking-wide text-white">Mis Finanzas</h1>
@@ -134,7 +146,6 @@ export default async function Home({
             </div>
           </div>
 
-          {/* Componente Cliente para el Selector Select */}
           <ProfileSelect
             profiles={allProfiles}
             currentProfileId={currentProfile.id}
@@ -156,7 +167,6 @@ export default async function Home({
             </span>
           </div>
 
-          {/* Límite y Botón de Editar */}
           <div className="space-y-2 pt-1 border-t border-slate-800/60">
             <div className="flex justify-between items-center">
               <span className="text-xs font-semibold text-slate-300">
@@ -172,7 +182,6 @@ export default async function Home({
               </a>
             </div>
 
-            {/* Barra de Progreso */}
             <div className="w-full bg-slate-800 h-2.5 rounded-full overflow-hidden">
               <div 
                 className={`h-full ${barraColor} transition-all duration-500 rounded-full`} 
@@ -230,7 +239,6 @@ export default async function Home({
               </p>
             ) : (
               listaGastos.map((item) => {
-                // Formatear la fecha para que se vea amigable (ej. 18 oct, 22:15)
                 const fechaFormateada = item.createdAt
                   ? new Date(item.createdAt).toLocaleDateString("es-MX", {
                       day: "numeric",
@@ -266,14 +274,13 @@ export default async function Home({
           </div>
         </section>
 
-        {/* Pie de página */}
         <footer className="pt-2 border-t border-slate-800/80 text-center text-[11px] text-slate-500">
           <span>Sincronizado en tiempo real con Neon DB</span>
         </footer>
 
       </div>
 
-      {/* MODAL PARA EDITAR LÍMITE MANUALMENTE */}
+      {/* MODAL PARA EDITAR LÍMITE */}
       {params.limitModal === "true" && (
         <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
           <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 w-full max-w-sm space-y-4 shadow-2xl animate-in fade-in zoom-in-95 duration-200">
