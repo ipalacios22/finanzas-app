@@ -7,7 +7,8 @@ import { cookies } from "next/headers";
 import Link from "next/link";
 import ProfileSelect from "./ProfileSelect";
 import SubmitButton from "./SubmitButton";
-import PinModal from "./PinModal";
+import LoginWelcomeModal from "./LoginWelcomeModal";
+import EditExpenseForm from "./EditExpenseForm";
 
 async function handleAddExpense(formData: FormData) {
   "use server";
@@ -59,7 +60,12 @@ async function handleReset(formData: FormData) {
 export default async function Home({
   searchParams,
 }: {
-  searchParams: Promise<{ profile?: string; limitModal?: string; error?: string }>;
+  searchParams: Promise<{
+    profile?: string;
+    limitModal?: string;
+    editExpenseId?: string;
+    error?: string;
+  }>;
 }) {
   const params = await searchParams;
 
@@ -73,10 +79,19 @@ export default async function Home({
   const activeProfileId = params.profile ? Number(params.profile) : allProfiles[0].id;
   const currentProfile = allProfiles.find((p) => p.id === activeProfileId) || allProfiles[0];
 
-  // Comprobar si la cookie de sesión activa coincide exactamente con el perfil seleccionado
   const cookieStore = await cookies();
   const activeAuthProfile = cookieStore.get("active_auth_profile")?.value;
   const isAuthenticated = activeAuthProfile === currentProfile.id.toString();
+
+  // Si no está autenticado, mostramos la pantalla de inicio/login
+  if (!isAuthenticated) {
+    return (
+      <LoginWelcomeModal
+        profiles={allProfiles}
+        hasError={params.error === "pin_incorrecto"}
+      />
+    );
+  }
 
   const listaGastos = await db
     .select()
@@ -84,8 +99,13 @@ export default async function Home({
     .where(eq(expenses.profileId, currentProfile.id))
     .orderBy(desc(expenses.createdAt));
 
+  const gastoAEditar = params.editExpenseId
+    ? listaGastos.find((g) => g.id === Number(params.editExpenseId))
+    : null;
+
   const limite = Number(currentProfile.spendingLimit);
   const totalGasto = listaGastos.reduce((sum, item) => sum + Number(item.amount), 0);
+  const restante = limite - totalGasto;
   const porcentaje = Math.min(Math.round((totalGasto / limite) * 100), 100);
   const excedeLimite = totalGasto > limite;
 
@@ -93,37 +113,27 @@ export default async function Home({
   let badgeTexto = "Dentro del presupuesto";
   let badgeColor = "text-emerald-400";
   let cardGlow = "shadow-emerald-500/10 border-slate-800/80";
-  let totalColor = "text-white";
+  let displayColor = "text-emerald-400";
 
   if (excedeLimite) {
     barraColor = "bg-rose-500 animate-pulse";
-    badgeTexto = `⚠️ Límite excedido por $${(totalGasto - limite).toLocaleString("es-MX")}`;
+    badgeTexto = `⚠️ Excedido por $${Math.abs(restante).toLocaleString("es-MX", { minimumFractionDigits: 2 })}`;
     badgeColor = "text-rose-400";
     cardGlow = "shadow-rose-500/30 border-rose-500/50";
-    totalColor = "text-rose-400";
+    displayColor = "text-rose-400";
   } else if (porcentaje >= 75) {
     barraColor = "bg-amber-500";
     badgeTexto = "⚡ Cerca del límite";
     badgeColor = "text-amber-400";
     cardGlow = "shadow-amber-500/20 border-amber-500/40";
+    displayColor = "text-amber-400";
   }
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center p-4 font-sans">
       
-      {/* MODAL DE PIN SI NO ESTÁ AUTENTICADO EN ESTE PERFIL */}
-      {!isAuthenticated && (
-        <PinModal
-          profileId={currentProfile.id}
-          profileName={currentProfile.name}
-          hasError={params.error === "pin_incorrecto"}
-        />
-      )}
-
-      {/* Contenedor tipo Celular */}
       <div className="w-full max-w-[393px] bg-slate-900 border border-slate-800 rounded-[40px] p-6 shadow-2xl space-y-6 relative overflow-hidden">
         
-        {/* Encabezado y Selector */}
         <header className="space-y-4">
           <div className="flex justify-between items-center">
             <h1 className="text-xl font-bold tracking-wide text-white">Mis Finanzas</h1>
@@ -152,14 +162,21 @@ export default async function Home({
           />
         </header>
 
-        {/* Display Acumulado + Barra de Límite */}
         <section className={`bg-slate-950 border rounded-2xl p-5 shadow-lg transition-all duration-300 space-y-4 ${cardGlow}`}>
           <div className="flex justify-between items-start">
             <div>
-              <span className="text-[10px] uppercase tracking-widest text-slate-400 font-bold">Gasto Acumulado</span>
-              <p className={`text-4xl font-extrabold mt-1 tracking-tight ${totalColor}`}>
-                ${totalGasto.toLocaleString("es-MX", { minimumFractionDigits: 2 })}
+              <span className="text-[10px] uppercase tracking-widest text-slate-400 font-bold">
+                Dinero Disponible
+              </span>
+              <p className={`text-4xl font-extrabold mt-1 tracking-tight ${displayColor}`}>
+                ${restante.toLocaleString("es-MX", { minimumFractionDigits: 2 })}
               </p>
+              <div className="mt-2 flex items-center gap-1.5 text-xs text-slate-400">
+                <span>Gastado hasta ahora:</span>
+                <strong className="text-slate-200 font-bold">
+                  ${totalGasto.toLocaleString("es-MX", { minimumFractionDigits: 2 })}
+                </strong>
+              </div>
             </div>
             
             <span className={`text-[10px] font-semibold px-2.5 py-1 rounded-full bg-slate-900 border border-slate-800 ${badgeColor}`}>
@@ -167,7 +184,7 @@ export default async function Home({
             </span>
           </div>
 
-          <div className="space-y-2 pt-1 border-t border-slate-800/60">
+          <div className="space-y-2 pt-2 border-t border-slate-800/60">
             <div className="flex justify-between items-center">
               <span className="text-xs font-semibold text-slate-300">
                 Límite: ${limite.toLocaleString("es-MX")}
@@ -225,7 +242,7 @@ export default async function Home({
           />
         </form>
 
-        {/* Historial de la Sesión con Fecha */}
+        {/* Historial con botones de Editar y Eliminar */}
         <section className="space-y-2">
           <div className="flex justify-between items-center text-xs font-semibold text-slate-400">
             <span>Lista del corte actual</span>
@@ -256,8 +273,17 @@ export default async function Home({
                         <span className="text-[10px] text-slate-500 block">📅 {fechaFormateada}</span>
                       )}
                     </div>
-                    <div className="flex items-center gap-3">
-                      <span className="font-bold text-rose-400 text-sm">-${Number(item.amount).toLocaleString("es-MX")}</span>
+                    <div className="flex items-center gap-2">
+                      <span className="font-bold text-rose-400 text-sm mr-1">-${Number(item.amount).toLocaleString("es-MX")}</span>
+                      
+                      <Link
+                        href={`/?profile=${currentProfile.id}&editExpenseId=${item.id}`}
+                        className="text-slate-400 hover:text-amber-400 font-bold px-1 rounded transition"
+                        title="Editar Gasto"
+                      >
+                        ✏️
+                      </Link>
+
                       <form action={handleDeleteExpense}>
                         <input type="hidden" name="id" value={item.id} />
                         <SubmitButton
@@ -279,6 +305,14 @@ export default async function Home({
         </footer>
 
       </div>
+
+      {/* MODAL PARA EDITAR GASTO */}
+      {gastoAEditar && (
+        <EditExpenseForm
+          expense={gastoAEditar}
+          profileId={currentProfile.id}
+        />
+      )}
 
       {/* MODAL PARA EDITAR LÍMITE */}
       {params.limitModal === "true" && (
@@ -317,6 +351,7 @@ export default async function Home({
           </div>
         </div>
       )}
+
     </main>
   );
 }

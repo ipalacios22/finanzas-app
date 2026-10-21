@@ -1,7 +1,7 @@
 "use server";
 
 import { db } from "../db";
-import { profiles } from "../db/schema";
+import { expenses, profiles } from "../db/schema";
 import { eq } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
@@ -59,4 +59,22 @@ export async function deleteProfile(formData: FormData) {
 export async function verifyMasterPin(inputPin: string) {
   const masterPin = process.env.MASTER_PIN;
   return inputPin.trim() === masterPin;
+}
+
+export async function updateExpense(formData: FormData) {
+  const id = Number(formData.get("id"));
+  const concept = (formData.get("concept") as string)?.trim();
+  const amount = Number(formData.get("amount"));
+
+  if (!id || !amount || amount <= 0) return;
+
+  await db
+    .update(expenses)
+    .set({
+      concept: concept || "Gasto sin concepto",
+      amount: amount.toString(),
+    })
+    .where(eq(expenses.id, id));
+
+  revalidatePath("/");
 }
