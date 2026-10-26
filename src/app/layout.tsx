@@ -3,7 +3,13 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Mis Finanzas",
-  description: "Calculadora de gastos colaborativa",
+  description: "Control de gastos personal",
+  manifest: "/manifest.json",
+  appleWebApp: {
+    capable: true,
+    statusBarStyle: "black-translucent",
+    title: "Mis Finanzas",
+  },
 };
 
 export default function RootLayout({
