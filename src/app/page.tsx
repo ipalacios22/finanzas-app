@@ -10,6 +10,15 @@ import SubmitButton from "./SubmitButton";
 import LoginWelcomeModal from "./LoginWelcomeModal";
 import EditExpenseForm from "./EditExpenseForm";
 
+// Auxiliar para obtener la fecha del lunes actual (YYYY-MM-DD)
+function getLunesActual(): string {
+  const d = new Date();
+  const day = d.getDay();
+  const diff = d.getDate() - day + (day === 0 ? -6 : 1);
+  const lunes = new Date(d.setDate(diff));
+  return lunes.toISOString().split("T")[0];
+}
+
 async function handleAddExpense(formData: FormData) {
   "use server";
   const profileId = Number(formData.get("profileId"));
@@ -65,14 +74,17 @@ export default async function Home({
     limitModal?: string;
     editExpenseId?: string;
     error?: string;
+    accionSemana?: string;
+    sobrantePendiente?: string;
+    verSemana?: string;
   }>;
 }) {
   const params = await searchParams;
 
   let allProfiles = await db.select().from(profiles);
   if (allProfiles.length === 0) {
-    const [p1] = await db.insert(profiles).values({ name: "Él", spendingLimit: "2000.00", pin: "1234" }).returning();
-    const [p2] = await db.insert(profiles).values({ name: "Ella", spendingLimit: "2000.00", pin: "1234" }).returning();
+    const [p1] = await db.insert(profiles).values({ name: "Él", spendingLimit: "500.00", pin: "1234" }).returning();
+    const [p2] = await db.insert(profiles).values({ name: "Ella", spendingLimit: "500.00", pin: "1234" }).returning();
     allProfiles = [p1, p2];
   }
 
@@ -83,7 +95,6 @@ export default async function Home({
   const activeAuthProfile = cookieStore.get("active_auth_profile")?.value;
   const isAuthenticated = activeAuthProfile === currentProfile.id.toString();
 
-  // Si no está autenticado, mostramos la pantalla de inicio/login
   if (!isAuthenticated) {
     return (
       <LoginWelcomeModal
@@ -93,21 +104,74 @@ export default async function Home({
     );
   }
 
-  const listaGastos = await db
+  // 1. Obtener la fecha del lunes actual
+  const strLunes = getLunesActual();
+  const fechaLunesActual = new Date(strLunes + "T00:00:00");
+
+  // 2. Consultar todos los gastos del perfil
+  const todosLosGastos = await db
     .select()
     .from(expenses)
     .where(eq(expenses.profileId, currentProfile.id))
     .orderBy(desc(expenses.createdAt));
 
-  const gastoAEditar = params.editExpenseId
-    ? listaGastos.find((g) => g.id === Number(params.editExpenseId))
+  // 3. Detectar gastos de semanas anteriores
+  const gastosAnteriores = todosLosGastos.filter((item) => {
+    if (!item.createdAt) return false;
+    return new Date(item.createdAt) < fechaLunesActual;
+  });
+
+  // Gastos estrictamente de la semana en curso
+  const listaGastos = todosLosGastos.filter((item) => {
+    if (!item.createdAt) return true;
+    return new Date(item.createdAt) >= fechaLunesActual;
+  });
+
+  // Agrupar gastos anteriores por semana
+  const semanasPasadasMap = gastosAnteriores.reduce((acc, item) => {
+    if (!item.createdAt) return acc;
+    const fecha = new Date(item.createdAt);
+    const day = fecha.getDay();
+    const diff = fecha.getDate() - day + (day === 0 ? -6 : 1);
+    const lunesSemana = new Date(fecha.setDate(diff)).toISOString().split("T")[0];
+
+    if (!acc[lunesSemana]) {
+      acc[lunesSemana] = {
+        lunes: lunesSemana,
+        gastos: [],
+        total: 0,
+      };
+    }
+    acc[lunesSemana].gastos.push(item);
+    acc[lunesSemana].total += Number(item.amount);
+    return acc;
+  }, {} as Record<string, { lunes: string; gastos: typeof gastosAnteriores; total: number }>);
+
+  const listaSemanasPasadas = Object.values(semanasPasadasMap);
+  const semanaSeleccionada = params.verSemana 
+    ? listaSemanasPasadas.find(s => s.lunes === params.verSemana) 
     : null;
 
-  const limite = Number(currentProfile.spendingLimit);
+  const limiteBase = Number(currentProfile.spendingLimit);
+  
+  let mostrarModalSemana = false;
+  let sobranteCalculado = 0;
+
+  if (gastosAnteriores.length > 0 && !params.accionSemana) {
+    mostrarModalSemana = true;
+    const totalGastadoAnterior = gastosAnteriores.reduce((sum, item) => sum + Number(item.amount), 0);
+    sobranteCalculado = Math.max(0, limiteBase - totalGastadoAnterior);
+  }
+
+  let limiteEfectivo = limiteBase;
+  if (params.accionSemana === "acumular" && params.sobrantePendiente) {
+    limiteEfectivo = limiteBase + Number(params.sobrantePendiente);
+  }
+
   const totalGasto = listaGastos.reduce((sum, item) => sum + Number(item.amount), 0);
-  const restante = limite - totalGasto;
-  const porcentaje = Math.min(Math.round((totalGasto / limite) * 100), 100);
-  const excedeLimite = totalGasto > limite;
+  const restante = limiteEfectivo - totalGasto;
+  const porcentaje = Math.min(Math.round((totalGasto / limiteEfectivo) * 100), 100);
+  const excedeLimite = totalGasto > limiteEfectivo;
 
   let barraColor = "bg-emerald-500";
   let badgeTexto = "Dentro del presupuesto";
@@ -128,6 +192,10 @@ export default async function Home({
     cardGlow = "shadow-amber-500/20 border-amber-500/40";
     displayColor = "text-amber-400";
   }
+
+  const gastoAEditar = params.editExpenseId
+    ? todosLosGastos.find((g) => g.id === Number(params.editExpenseId))
+    : null;
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center p-4 font-sans">
@@ -166,7 +234,7 @@ export default async function Home({
           <div className="flex justify-between items-start">
             <div>
               <span className="text-[10px] uppercase tracking-widest text-slate-400 font-bold">
-                Dinero Disponible
+                Dinero Disponible (Semana Actual)
               </span>
               <p className={`text-4xl font-extrabold mt-1 tracking-tight ${displayColor}`}>
                 ${restante.toLocaleString("es-MX", { minimumFractionDigits: 2 })}
@@ -187,7 +255,7 @@ export default async function Home({
           <div className="space-y-2 pt-2 border-t border-slate-800/60">
             <div className="flex justify-between items-center">
               <span className="text-xs font-semibold text-slate-300">
-                Límite: ${limite.toLocaleString("es-MX")}
+                Límite: ${limiteEfectivo.toLocaleString("es-MX")}
               </span>
               
               <a 
@@ -300,11 +368,126 @@ export default async function Home({
           </div>
         </section>
 
+        {/* 📚 SECCIÓN DE HISTORIAL DE SEMANAS PASADAS AGRUPADAS */}
+        {listaSemanasPasadas.length > 0 && (
+          <section className="space-y-2 pt-3 border-t border-slate-800">
+            <div className="flex justify-between items-center text-xs font-semibold text-slate-400">
+              <span>📚 Historial semanas pasadas</span>
+              <span>{listaSemanasPasadas.length} semanas</span>
+            </div>
+
+            <div className="max-h-40 overflow-y-auto space-y-2 pr-1">
+              {listaSemanasPasadas.map((semana) => {
+                const fechaLunesFormatted = new Date(semana.lunes + "T00:00:00").toLocaleDateString("es-MX", {
+                  day: "numeric",
+                  month: "short",
+                });
+
+                return (
+                  <a
+                    key={semana.lunes}
+                    href={`/?profile=${currentProfile.id}&verSemana=${semana.lunes}`}
+                    className="bg-slate-950/60 hover:bg-slate-950 border border-slate-900 hover:border-slate-800 rounded-xl p-3 flex justify-between items-center text-xs transition block cursor-pointer group"
+                  >
+                    <div>
+                      <span className="text-slate-200 font-semibold block group-hover:text-emerald-400 transition">
+                        Semana del {fechaLunesFormatted}
+                      </span>
+                      <span className="text-[10px] text-slate-500 block">{semana.gastos.length} movimientos</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="font-bold text-slate-300 text-sm">-${semana.total.toLocaleString("es-MX", { minimumFractionDigits: 2 })}</span>
+                      <span className="text-slate-600 group-hover:text-slate-400">👁️</span>
+                    </div>
+                  </a>
+                );
+              })}
+            </div>
+          </section>
+        )}
+
         <footer className="pt-2 border-t border-slate-800/80 text-center text-[11px] text-slate-500">
           <span>Sincronizado en tiempo real con Neon DB</span>
         </footer>
 
       </div>
+
+      {/* MODAL DE NUEVA SEMANA */}
+      {mostrarModalSemana && (
+        <div className="fixed inset-0 bg-slate-950/90 backdrop-blur-md flex items-center justify-center p-4 z-50">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 w-full max-w-sm space-y-5 shadow-2xl animate-in fade-in zoom-in-95 duration-200">
+            <div className="space-y-2 text-center">
+              <span className="text-3xl">🎉</span>
+              <h2 className="text-lg font-bold text-white">¡Nueva semana detectada!</h2>
+              <p className="text-xs text-slate-400 leading-relaxed">
+                De la semana pasada te sobraron <strong className="text-emerald-400">${sobranteCalculado.toFixed(2)}</strong>. ¿Cómo deseas arrancar este nuevo ciclo?
+              </p>
+            </div>
+
+            <div className="space-y-2.5 pt-1">
+              <a
+                href={`/?profile=${currentProfile.id}&accionSemana=acumular&sobrantePendiente=${sobranteCalculado}`}
+                className="w-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold py-3 rounded-xl text-xs shadow-md shadow-emerald-500/20 text-center block transition active:scale-[0.98]"
+              >
+                Sumar sobrante (${(limiteBase + sobranteCalculado).toFixed(2)} total)
+              </a>
+
+              <a
+                href={`/?profile=${currentProfile.id}&accionSemana=reiniciar`}
+                className="w-full bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold py-3 rounded-xl text-xs text-center block transition active:scale-[0.98]"
+              >
+                Empezar limpio con mis ${limiteBase.toFixed(2)}
+              </a>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL PARA VER EL DETALLE DE UNA SEMANA PASADA */}
+      {semanaSeleccionada && (
+        <div className="fixed inset-0 bg-slate-950/90 backdrop-blur-md flex items-center justify-center p-4 z-50">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 w-full max-w-sm space-y-4 shadow-2xl animate-in fade-in zoom-in-95 duration-200">
+            <div className="flex justify-between items-center">
+              <div>
+                <h2 className="text-base font-bold text-white">Detalle de Semana</h2>
+                <p className="text-[11px] text-slate-400">
+                  Corte iniciado el {new Date(semanaSeleccionada.lunes + "T00:00:00").toLocaleDateString("es-MX", { day: "numeric", month: "long", year: "numeric" })}
+                </p>
+              </div>
+              <span className="text-xs font-bold text-rose-400 bg-rose-500/10 px-2.5 py-1 rounded-full border border-rose-500/20">
+                -${semanaSeleccionada.total.toLocaleString("es-MX", { minimumFractionDigits: 2 })}
+              </span>
+            </div>
+
+            <div className="max-h-60 overflow-y-auto space-y-2 pr-1 pt-1">
+              {semanaSeleccionada.gastos.map((gasto) => {
+                const fechaGasto = gasto.createdAt
+                  ? new Date(gasto.createdAt).toLocaleDateString("es-MX", { day: "numeric", month: "short" })
+                  : "";
+
+                return (
+                  <div key={gasto.id} className="bg-slate-950 border border-slate-800/80 rounded-xl p-2.5 flex justify-between items-center text-xs">
+                    <div>
+                      <span className="text-slate-200 font-semibold block">{gasto.concept}</span>
+                      <span className="text-[10px] text-slate-500 block">📅 {fechaGasto}</span>
+                    </div>
+                    <span className="font-bold text-rose-400">-${Number(gasto.amount).toLocaleString("es-MX")}</span>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="pt-2">
+              <a
+                href={`/?profile=${currentProfile.id}`}
+                className="w-full bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold py-2.5 rounded-xl text-xs text-center block transition"
+              >
+                Cerrar
+              </a>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* MODAL PARA EDITAR GASTO */}
       {gastoAEditar && (
@@ -328,7 +511,7 @@ export default async function Home({
               <input
                 type="number"
                 name="newLimit"
-                defaultValue={limite}
+                defaultValue={limiteBase}
                 required
                 step="any"
                 className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-base font-bold text-white focus:outline-none focus:border-emerald-500"
