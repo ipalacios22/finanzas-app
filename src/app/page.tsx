@@ -10,13 +10,21 @@ import SubmitButton from "./SubmitButton";
 import LoginWelcomeModal from "./LoginWelcomeModal";
 import EditExpenseForm from "./EditExpenseForm";
 
-// Auxiliar para obtener la fecha del lunes actual (YYYY-MM-DD)
-function getLunesActual(): string {
+// Obtiene estrictamente el YYYY-MM-DD local de cualquier fecha
+function toLocalDateStr(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+// Obtiene el YYYY-MM-DD del lunes de la semana actual
+function getLunesActualStr(): string {
   const d = new Date();
   const day = d.getDay();
   const diff = d.getDate() - day + (day === 0 ? -6 : 1);
-  const lunes = new Date(d.setDate(diff));
-  return lunes.toISOString().split("T")[0];
+  const lunes = new Date(d.getFullYear(), d.getMonth(), diff);
+  return toLocalDateStr(lunes);
 }
 
 async function handleAddExpense(formData: FormData) {
@@ -66,6 +74,28 @@ async function handleReset(formData: FormData) {
   revalidatePath("/");
 }
 
+async function handleProcesarSemana(formData: FormData) {
+  "use server";
+  const profileId = Number(formData.get("profileId"));
+  const accion = formData.get("accion") as string;
+  const sobrante = Number(formData.get("sobrante") || 0);
+  const strLunes = getLunesActualStr();
+
+  const cookieStore = await cookies();
+  cookieStore.set(`semana_procesada_${profileId}_${strLunes}`, "true", { path: "/" });
+
+  if (accion === "acumular" && sobrante > 0) {
+    const perfil = await db.select().from(profiles).where(eq(profiles.id, profileId)).then(res => res[0]);
+    if (perfil) {
+      const nuevoLimite = Number(perfil.spendingLimit) + sobrante;
+      await db.update(profiles).set({ spendingLimit: nuevoLimite.toString() }).where(eq(profiles.id, profileId));
+    }
+  }
+
+  revalidatePath("/");
+  redirect(`/?profile=${profileId}`);
+}
+
 export default async function Home({
   searchParams,
 }: {
@@ -74,8 +104,7 @@ export default async function Home({
     limitModal?: string;
     editExpenseId?: string;
     error?: string;
-    accionSemana?: string;
-    sobrantePendiente?: string;
+    confirmarAccion?: string;
     verSemana?: string;
   }>;
 }) {
@@ -104,36 +133,32 @@ export default async function Home({
     );
   }
 
-  // 1. Obtener la fecha del lunes actual
-  const strLunes = getLunesActual();
-  const fechaLunesActual = new Date(strLunes + "T00:00:00");
+  const strLunesActual = getLunesActualStr();
 
-  // 2. Consultar todos los gastos del perfil
   const todosLosGastos = await db
     .select()
     .from(expenses)
     .where(eq(expenses.profileId, currentProfile.id))
     .orderBy(desc(expenses.createdAt));
 
-  // 3. Detectar gastos de semanas anteriores
   const gastosAnteriores = todosLosGastos.filter((item) => {
     if (!item.createdAt) return false;
-    return new Date(item.createdAt) < fechaLunesActual;
+    const fechaGastoStr = toLocalDateStr(new Date(item.createdAt));
+    return fechaGastoStr < strLunesActual;
   });
 
-  // Gastos estrictamente de la semana en curso
   const listaGastos = todosLosGastos.filter((item) => {
     if (!item.createdAt) return true;
-    return new Date(item.createdAt) >= fechaLunesActual;
+    const fechaGastoStr = toLocalDateStr(new Date(item.createdAt));
+    return fechaGastoStr >= strLunesActual;
   });
 
-  // Agrupar gastos anteriores por semana
   const semanasPasadasMap = gastosAnteriores.reduce((acc, item) => {
     if (!item.createdAt) return acc;
     const fecha = new Date(item.createdAt);
     const day = fecha.getDay();
     const diff = fecha.getDate() - day + (day === 0 ? -6 : 1);
-    const lunesSemana = new Date(fecha.setDate(diff)).toISOString().split("T")[0];
+    const lunesSemana = toLocalDateStr(new Date(fecha.getFullYear(), fecha.getMonth(), diff));
 
     if (!acc[lunesSemana]) {
       acc[lunesSemana] = {
@@ -154,24 +179,16 @@ export default async function Home({
 
   const limiteBase = Number(currentProfile.spendingLimit);
   
-  let mostrarModalSemana = false;
-  let sobranteCalculado = 0;
+  const yaFueProcesadaEstaSemana = cookieStore.get(`semana_procesada_${currentProfile.id}_${strLunesActual}`)?.value === "true";
+  const mostrarModalSemana = gastosAnteriores.length > 0 && !yaFueProcesadaEstaSemana && !params.confirmarAccion;
 
-  if (gastosAnteriores.length > 0 && !params.accionSemana) {
-    mostrarModalSemana = true;
-    const totalGastadoAnterior = gastosAnteriores.reduce((sum, item) => sum + Number(item.amount), 0);
-    sobranteCalculado = Math.max(0, limiteBase - totalGastadoAnterior);
-  }
-
-  let limiteEfectivo = limiteBase;
-  if (params.accionSemana === "acumular" && params.sobrantePendiente) {
-    limiteEfectivo = limiteBase + Number(params.sobrantePendiente);
-  }
+  const totalGastadoAnterior = gastosAnteriores.reduce((sum, item) => sum + Number(item.amount), 0);
+  const sobranteCalculado = Math.max(0, limiteBase - totalGastadoAnterior);
 
   const totalGasto = listaGastos.reduce((sum, item) => sum + Number(item.amount), 0);
-  const restante = limiteEfectivo - totalGasto;
-  const porcentaje = Math.min(Math.round((totalGasto / limiteEfectivo) * 100), 100);
-  const excedeLimite = totalGasto > limiteEfectivo;
+  const restante = limiteBase - totalGasto;
+  const porcentaje = Math.min(Math.round((totalGasto / limiteBase) * 100), 100);
+  const excedeLimite = totalGasto > limiteBase;
 
   let barraColor = "bg-emerald-500";
   let badgeTexto = "Dentro del presupuesto";
@@ -255,7 +272,7 @@ export default async function Home({
           <div className="space-y-2 pt-2 border-t border-slate-800/60">
             <div className="flex justify-between items-center">
               <span className="text-xs font-semibold text-slate-300">
-                Límite: ${limiteEfectivo.toLocaleString("es-MX")}
+                Límite: ${limiteBase.toLocaleString("es-MX")}
               </span>
               
               <a 
@@ -426,19 +443,55 @@ export default async function Home({
 
             <div className="space-y-2.5 pt-1">
               <a
-                href={`/?profile=${currentProfile.id}&accionSemana=acumular&sobrantePendiente=${sobranteCalculado}`}
+                href={`/?profile=${currentProfile.id}&confirmarAccion=acumular`}
                 className="w-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold py-3 rounded-xl text-xs shadow-md shadow-emerald-500/20 text-center block transition active:scale-[0.98]"
               >
                 Sumar sobrante (${(limiteBase + sobranteCalculado).toFixed(2)} total)
               </a>
 
               <a
-                href={`/?profile=${currentProfile.id}&accionSemana=reiniciar`}
+                href={`/?profile=${currentProfile.id}&confirmarAccion=reiniciar`}
                 className="w-full bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold py-3 rounded-xl text-xs text-center block transition active:scale-[0.98]"
               >
                 Empezar limpio con mis ${limiteBase.toFixed(2)}
               </a>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* SUB-MODAL DE CONFIRMACIÓN ANTES DE APLICAR LA ACCIÓN */}
+      {params.confirmarAccion && (
+        <div className="fixed inset-0 bg-slate-950/90 backdrop-blur-md flex items-center justify-center p-4 z-50">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 w-full max-w-sm space-y-5 shadow-2xl animate-in fade-in zoom-in-95 duration-200">
+            <div className="space-y-2 text-center">
+              <span className="text-3xl">⚠️</span>
+              <h2 className="text-base font-bold text-white">¿Confirmar acción?</h2>
+              <p className="text-xs text-slate-400 leading-relaxed">
+                {params.confirmarAccion === "acumular"
+                  ? `Se sumará el sobrante de $${sobranteCalculado.toFixed(2)} a tu límite para esta semana.`
+                  : "Se iniciará la semana con tu límite limpio, archivando el periodo anterior."}
+              </p>
+            </div>
+
+            <form action={handleProcesarSemana} className="space-y-2.5 pt-1">
+              <input type="hidden" name="profileId" value={currentProfile.id} />
+              <input type="hidden" name="accion" value={params.confirmarAccion} />
+              <input type="hidden" name="sobrante" value={sobranteCalculado} />
+
+              <SubmitButton
+                label="Sí, confirmar"
+                loadingLabel="Aplicando..."
+                className="w-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold py-3 rounded-xl text-xs shadow-md shadow-emerald-500/20 text-center block transition active:scale-[0.98] cursor-pointer"
+              />
+
+              <a
+                href={`/?profile=${currentProfile.id}`}
+                className="w-full bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold py-3 rounded-xl text-xs text-center block transition active:scale-[0.98]"
+              >
+                Regresar / Cancelar
+              </a>
+            </form>
           </div>
         </div>
       )}
